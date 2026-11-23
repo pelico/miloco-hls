@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.fengke.miloco-hls</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/fengke/.local/share/miloco-hls/watchdog.sh</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/fengke</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/fengke/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>WatchPaths</key>
+	<array>
+		<!-- miloco 每次启动都会写这个日志，从而唤醒本服务 -->
+		<string>/Users/fengke/.openclaw/miloco/log/launchd-stdio.log</string>
+	</array>
+	<key>StandardOutPath</key>
+	<string>/Users/fengke/.local/share/miloco-hls/bridge.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/fengke/.local/share/miloco-hls/bridge.log</string>
+</dict>
+</plist>
