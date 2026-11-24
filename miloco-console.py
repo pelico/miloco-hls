@@ -519,7 +519,7 @@ function startPreview(did, name){
   if(!window.Hls||!Hls.isSupported()){ v.src=url; return; }
   HLS=new Hls({
     liveDurationInfinity:true,
-    manifestLoadingTimeOut:10000, manifestLoadingMaxRetry:3, manifestRetryPeriod:2000,
+    manifestLoadingTimeOut:25000, manifestLoadingMaxRetry:2, manifestRetryPeriod:2000,
     fragLoadingTimeOut:25000,
   });
   HLS.loadSource(url); HLS.attachMedia(v);
