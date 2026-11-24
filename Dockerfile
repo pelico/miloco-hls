@@ -11,12 +11,11 @@
 #     -e CONSOLE_PASS_FILE=/data/console.pass \
 #     miloco-hls
 # 说明: miloco 本体仍跑在宿主机(:1810)，容器经 host.docker.internal 访问
+FROM mwader/static-ffmpeg:7.1 AS ff
 FROM python:3.12-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir aiohttp av websockets
+COPY --from=ff /ffmpeg /usr/local/bin/ffmpeg
+RUN pip install --no-cache-dir aiohttp av websockets
 
 WORKDIR /app
 COPY miloco-hls-bridge.py miloco-console.py start.sh ./

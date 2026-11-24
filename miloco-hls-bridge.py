@@ -600,19 +600,6 @@ class CameraPipeline:
 
 # ---------- Web 服务 ----------
 
-INDEX_TMPL = """<!doctype html><meta charset=utf-8>
-<title>miloco HLS</title>
-<style>body{{font-family:-apple-system,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem}}
-.cam{{margin:1.5rem 0}}video{{width:100%;border-radius:8px;background:#000}}code{{color:#666;font-size:.85em}}</style>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20"></script>
-<script>function play(id,did){{const v=document.getElementById(id);
-if(v.dataset.on){{v.pause();v.removeAttribute('src');v.load();v.dataset.on='';event.target.textContent='播放';return}}
-const url='/cam/'+did+'/index.m3u8';if(Hls.isSupported()){{const h=new Hls();h.loadSource(url);h.attachMedia(v)}}
-else{{v.src=url}}v.play();v.dataset.on='1';event.target.textContent='停止'}}</script>
-<h1>miloco 摄像头</h1>{cams}
-<p><code>/cam/&lt;did&gt;/index.m3u8</code> 音视频 · <code>/audio/&lt;did&gt;/index.m3u8</code> 纯音频</p>"""
-
-
 class Bridge:
     def __init__(self, session: ClientSession):
         self.session = session
@@ -662,17 +649,10 @@ class Bridge:
     # -- 路由 --
 
     async def h_index(self, request):
-        cams = "".join(
-            f'<div class="cam"><h3>{c["name"]}</h3>'
-            f'<video id="v{c["did"]}" controls muted playsinline></video>'
-            f"<button onclick=\"play('v{c['did']}','{c['did']}')\">播放</button> "
-            f'<code>/cam/{c["did"]}/index.m3u8</code></div>'
-            for c in self.cameras
-        )
-        return web.Response(
-            text=INDEX_TMPL.format(cams=cams or "<p>未发现摄像头</p>"),
-            content_type="text/html",
-        )
+        """根路径只是个流服务，直接跳转到控制台页面。"""
+        host = request.headers.get("Host", request.host)
+        hostname = host.split(":")[0]
+        raise web.HTTPFound(f"http://{hostname}:18190/")
 
     async def _serve_m3u8(self, did: str, name: str, touch):
         p = self.pipe(did)
