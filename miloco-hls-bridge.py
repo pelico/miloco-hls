@@ -649,10 +649,11 @@ class Bridge:
     # -- 路由 --
 
     async def h_index(self, request):
-        """根路径只是个流服务，直接跳转到控制台页面。"""
+        """根路径只是个流服务，直接跳转到控制台页面（端口跟随 CONSOLE_PORT）。"""
         host = request.headers.get("Host", request.host)
         hostname = host.split(":")[0]
-        raise web.HTTPFound(f"http://{hostname}:18190/")
+        cport = os.environ.get("CONSOLE_PORT", "18190")
+        raise web.HTTPFound(f"http://{hostname}:{cport}/")
 
     async def _serve_m3u8(self, did: str, name: str, touch):
         p = self.pipe(did)
