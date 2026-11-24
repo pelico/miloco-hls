@@ -27,6 +27,7 @@ miloco 把全部 MIoT 控制能力（总开关/云台/AI检测/巡航/隐私保�
 import asyncio
 import json
 import os
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -47,6 +48,75 @@ SCHEDULES_FILE = Path(
 BRIDGE_BASE_ENV = os.environ.get("BRIDGE_BASE", "")  # 留空则用 location.host:18180
 
 SCHED_LOCK = asyncio.Lock()
+
+# ---------- 访问密码 ----------
+# 优先 CONSOLE_PASS 环境变量；否则读写 CONSOLE_PASS_FILE；都没有则自动生成并落盘
+_PASS_FILE = Path(
+    os.environ.get(
+        "CONSOLE_PASS_FILE", Path.home() / ".local/share/miloco-hls/console.pass"
+    )
+)
+CONSOLE_PASS = os.environ.get("CONSOLE_PASS")
+if not CONSOLE_PASS:
+    if _PASS_FILE.exists():
+        CONSOLE_PASS = _PASS_FILE.read_text().strip()
+    if not CONSOLE_PASS:
+        CONSOLE_PASS = secrets.token_urlsafe(6)
+        _PASS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PASS_FILE.write_text(CONSOLE_PASS)
+        print(f"已生成访问密码: {CONSOLE_PASS}  (存于 {_PASS_FILE})", flush=True)
+SESSIONS: set[str] = set()
+COOKIE = "mcsid"
+
+
+@web.middleware
+async def auth_mw(request: web.Request, handler):
+    if not CONSOLE_PASS or request.path == "/login":
+        return await handler(request)
+    if request.cookies.get(COOKIE) in SESSIONS:
+        return await handler(request)
+    if request.path.startswith("/api/"):
+        return web.json_response({"code": 401, "message": "未登录"}, status=401)
+    raise web.HTTPFound("/login")
+
+
+LOGIN_PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>摄像头控制台 · 登录</title><style>
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#10141c;color:#e8ecf3;font:15px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif}}
+.card{{background:#1a2030;border:1px solid #2a3348;border-radius:12px;padding:28px 26px;width:300px}}
+h1{{font-size:17px;margin:0 0 18px}}
+input{{width:100%;box-sizing:border-box;background:#10141c;border:1px solid #2a3348;
+border-radius:8px;color:#e8ecf3;padding:10px 12px;font-size:15px;outline:none}}
+input:focus{{border-color:#4a7dff}}
+button{{width:100%;margin-top:12px;background:#4a7dff;border:none;border-radius:8px;
+color:#fff;padding:10px;font-size:15px;cursor:pointer}}
+button:hover{{background:#3a6bef}}
+.err{{color:#ff6b6b;font-size:13px;margin-top:10px;{show}}}
+</style></head><body><form class="card" method="post" action="/login">
+<h1>摄像头控制台</h1>
+<input type="password" name="password" placeholder="访问密码" autofocus>
+<button type="submit">进入</button>
+<div class="err">密码错误，请重试</div>
+</form></body></html>"""
+
+
+async def h_login_get(request: web.Request) -> web.Response:
+    if request.cookies.get(COOKIE) in SESSIONS:
+        raise web.HTTPFound("/")
+    return web.Response(text=LOGIN_PAGE.format(show="none"), content_type="text/html")
+
+
+async def h_login_post(request: web.Request) -> web.Response:
+    form = await request.post()
+    if form.get("password") == CONSOLE_PASS:
+        sid = secrets.token_urlsafe(32)
+        SESSIONS.add(sid)
+        resp = web.HTTPFound("/")
+        resp.set_cookie(COOKIE, sid, max_age=30 * 86400, httponly=True, samesite="Lax")
+        raise resp
+    return web.Response(text=LOGIN_PAGE.format(show="block"), content_type="text/html")
 
 
 def miloco_token() -> str:
@@ -150,7 +220,24 @@ async def h_index(_req: web.Request) -> web.Response:
 
 async def h_cameras(req: web.Request) -> web.Response:
     resp = await miloco_req(req.app["client"], "GET", "/api/miot/camera_list")
-    return resp
+    try:
+        data = json.loads(resp.text)
+        cams = data.get("data") or []
+        if isinstance(cams, list) and cams:
+            # 合并 scope 的 lan_reachable，前端用它挑选默认预览的摄像头
+            scope = await miloco_req(
+                req.app["client"], "GET", "/api/miot/scope/cameras"
+            )
+            try:
+                scon = json.loads(scope.text).get("data") or []
+                lan = {c["did"]: c.get("lan_reachable") for c in scon}
+                for c in cams:
+                    c["lan_reachable"] = lan.get(c["did"])
+            except (ValueError, KeyError, AttributeError):
+                pass
+        return web.json_response(data, status=resp.status)
+    except ValueError:
+        return resp
 
 
 async def h_spec(req: web.Request) -> web.Response:
@@ -246,7 +333,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 :root{--bg:#0f1115;--card:#181b22;--card2:#1f232c;--line:#2a2f3a;--tx:#e6e9ef;--tx2:#8b93a3;--ac:#4f8cff;--ok:#3fbf6f;--bad:#e05252}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:16px}
-.wrap{max-width:1200px;margin:0 auto}
+.wrap{max-width:1560px;margin:0 auto}
 h1{font-size:18px;margin-bottom:14px;display:flex;align-items:center;gap:10px}
 h1 .dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
 h1 .dot.up{background:var(--ok)}
@@ -257,8 +344,8 @@ h1 .dot.up{background:var(--ok)}
 .cam{padding:9px 11px;border-radius:8px;background:var(--card2);cursor:pointer;border:1px solid transparent}
 .cam:hover{border-color:var(--line)}
 .cam.sel{border-color:var(--ac);background:#20304d}
-.cam .nm{font-weight:600}
-.cam .sub{color:var(--tx2);font-size:12px;display:flex;gap:8px;margin-top:2px}
+.cam .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cam .sub{color:var(--tx2);font-size:12px;display:flex;gap:8px;margin-top:2px;white-space:nowrap}
 .on{color:var(--ok)}.off{color:var(--bad)}
 #player{width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;object-fit:contain}
 .preview-hint{color:var(--tx2);font-size:12px;margin-top:6px}
@@ -290,10 +377,12 @@ select,input[type=text],input[type=time],input[type=number]{background:var(--car
 .dpad{display:grid;grid-template-columns:repeat(3,52px);gap:6px;justify-content:center;padding:10px 0}
 .dpad .btn{height:44px;font-size:16px}
 .ro{color:var(--tx2);font-variant-numeric:tabular-nums}
-.schrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line);flex-wrap:wrap}
-.schrow:last-child{border:none}
-.schrow .t{font-variant-numeric:tabular-nums;font-weight:600;min-width:52px}
-.schrow .meta{color:var(--tx2);font-size:12px;flex:1}
+.schrow{border:1px solid var(--line);border-radius:8px;background:var(--card2);padding:9px 11px;margin-bottom:8px}
+.schrow .l1{display:flex;align-items:center;gap:9px}
+.schrow .t{font-weight:700;font-size:15px;font-variant-numeric:tabular-nums}
+.schrow .cam{font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.schrow .l2{display:flex;align-items:center;gap:8px;margin-top:7px;font-size:12px;color:var(--tx2)}
+.schrow .l2 .sp{flex:1}
 .tag{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--card2);border:1px solid var(--line)}
 .tag.ok{color:var(--ok)}.tag.bad{color:var(--bad)}.tag.dis{color:var(--tx2)}
 .form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
@@ -301,6 +390,11 @@ select,input[type=text],input[type=time],input[type=number]{background:var(--car
 .toast.show{opacity:1}
 .toast.err{border-color:var(--bad);color:var(--bad)}
 .muted{color:var(--tx2);font-size:12px}
+.urlrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line)}
+.urlrow:last-child{border:none}
+.urlrow .lbl{color:var(--tx)}
+.urlrow .sub{color:var(--tx2);font-size:12px;flex:1}
+.urlrow .btn{flex:none}
 h2{font-size:15px;margin:4px 0 10px}
 #schedulecard input[type=time]{width:96px}
 </style>
@@ -328,6 +422,12 @@ h2{font-size:15px;margin:4px 0 10px}
       <h2 id="pvTitle">实时画面</h2>
       <video id="player" controls autoplay muted playsinline></video>
       <div class="preview-hint" id="pvHint"></div>
+      <div id="pvRetry" style="margin-top:8px;display:none">
+        <button class="btn" id="pvRetryBtn">重新尝试</button>
+      </div>
+      <h2 style="margin-top:14px">流地址</h2>
+      <div id="urls"></div>
+      <div class="muted" style="margin-top:6px">有观看时自动开播，无人观看 1 分钟后自动停止</div>
     </div>
     <div id="panels"></div>
   </div>
@@ -350,6 +450,14 @@ async function api(path, opts){
   return j;
 }
 const ctrl=(did,body)=>api(`/api/devices/${did}/control`,{method:"POST",body:JSON.stringify(body)});
+// miloco 控制响应：set_property → data.results[]，call_action → data.result{}
+function ctrlResult(j){
+  const d=(j&&j.data)||{};
+  if(Array.isArray(d.results)) return d.results[0]||{};
+  if(d.result) return d.result;
+  if(Array.isArray(j&&j.results)) return j.results[0]||{};
+  return j||{};
+}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function loadCameras(){
@@ -361,7 +469,12 @@ async function loadCameras(){
   for(const c of cams){
     const d=document.createElement("div");
     d.className="cam"+(c.did===DID?" sel":"");
-    d.innerHTML=`<div class="nm">${esc(c.name)}</div><div class="sub"><span>${esc(c.model||"")}</span><span class="${c.online?"on":"off"}">${c.online?"● 在线":"○ 离线"}</span></div>`;
+    // 单一状态标识：离线 < 在线但画面不可用 < 在线可用
+    const st=!c.online
+      ?'<span class="off">○ 离线</span>'
+      :(c.lan_reachable===false?'<span class="tag bad">画面不可用</span>':'<span class="on">● 在线</span>');
+    d.innerHTML=`<div class="nm" title="${esc(c.name)}">${esc(c.name)}</div>`
+      +`<div class="sub"><span>${esc(c.model||"")}</span>${st}</div>`;
     d.onclick=()=>selectCam(c.did);
     list.appendChild(d);
     const o=document.createElement("option"); o.value=c.did; o.textContent=c.name; sel.appendChild(o);
@@ -370,19 +483,53 @@ async function loadCameras(){
 }
 
 /* ---- 预览 ---- */
+function renderUrls(did){
+  const base=location.protocol+"//"+location.hostname+":18180";
+  const rows=[
+    ["音视频（HLS）",`${base}/cam/${did}/index.m3u8`],
+    ["纯音频（HLS）",`${base}/audio/${did}/index.m3u8`],
+    ["音频（Opus，供语音识别）",`${base}/audio/${did}/stream.ogg`],
+  ];
+  const box=$("#urls"); box.innerHTML="";
+  for(const [label,url] of rows){
+    const d=document.createElement("div"); d.className="urlrow";
+    const l=document.createElement("div");
+    l.innerHTML=`<div class="lbl" style="font-weight:600">${label}</div><div class="sub" style="word-break:break-all">${esc(url)}</div>`;
+    const b=document.createElement("button"); b.className="btn"; b.textContent="复制";
+    b.onclick=async()=>{
+      try{ await navigator.clipboard.writeText(url); toast("已复制"); }
+      catch(e){
+        const i=document.createElement("input"); i.value=url; document.body.appendChild(i);
+        i.select(); document.execCommand("copy"); i.remove(); toast("已复制");
+      }
+    };
+    d.append(l,b); box.appendChild(d);
+  }
+}
 function startPreview(did, name){
   if(HLS){HLS.destroy();HLS=null;}
   const v=$("#player"), hint=$("#pvHint");
   $("#pvTitle").textContent="实时画面 · "+(name||did);
+  $("#pvRetry").style.display="none";
+  $("#pvRetryBtn").onclick=()=>startPreview(did,name);
   const base=location.protocol+"//"+location.hostname+":18180";
   const url=`${base}/cam/${did}/index.m3u8`;
   hint.textContent="";
+  renderUrls(did);
   if(!window.Hls||!Hls.isSupported()){ v.src=url; return; }
-  HLS=new Hls({liveDurationInfinity:true,manifestLoadingTimeOut:8000});
+  HLS=new Hls({
+    liveDurationInfinity:true,
+    manifestLoadingTimeOut:10000, manifestLoadingMaxRetry:3, manifestRetryPeriod:2000,
+    fragLoadingTimeOut:25000,
+  });
   HLS.loadSource(url); HLS.attachMedia(v);
   HLS.on(Hls.Events.ERROR,(e,data)=>{
     if(!data.fatal) return;
-    hint.textContent="预览不可用：miloco-hls-bridge 未运行或摄像头离线（控制功能不受影响）";
+    // 重试耗尽：停止转圈，给出明确提示
+    if(HLS){HLS.destroy();HLS=null;}
+    v.removeAttribute("src"); v.load();
+    hint.textContent="拿不到视频流：摄像头没有在推流（miloco 感知可能已关闭，或设备已离线）。控制功能不受影响。";
+    $("#pvRetry").style.display="block";
   });
 }
 
@@ -433,14 +580,24 @@ function propRow(iid){
     right.appendChild(s);
   }
   row.appendChild(right);
+  // 曾经设置被设备拒绝过的属性：置灰并标注「设备不支持」，控件禁用
+  if(localStorage.getItem(deadKey(iid))){
+    row.style.opacity=".55";
+    const t=document.createElement("span"); t.className="tag dis"; t.textContent="设备不支持";
+    right.prepend(t);
+    right.querySelectorAll("input,select,button").forEach(e=>e.disabled=true);
+  }
   return row;
 }
 async function setProp(iid,value){
   try{
     const j=await ctrl(DID,{type:"set_property",iid,value});
-    const r=(j.results||[])[0]||{};
+    const r=ctrlResult(j);
     if(r.code===0){ PROPS[iid]={code:0,value}; toast("已设置 "+iid); }
-    else{ toast("设置失败: "+(r.message||r.code),true); refreshProps(); }
+    else{
+      localStorage.setItem(deadKey(iid),"1");  // 记住设备端拒绝的项，UI 置灰
+      toast("设备拒绝了该设置（不支持）",true); refreshProps();
+    }
   }catch(e){ toast(e.message,true); refreshProps(); }
 }
 
@@ -451,8 +608,8 @@ async function doAction(iid,desc){
   if(DANGEROUS.test(desc)&&!confirm(`确认执行「${desc}」？`)) return;
   try{
     const j=await ctrl(DID,{type:"call_action",iid});
-    const r=(j.results||[])[0]||{};
-    r.code===0?toast("已执行: "+desc):toast("执行失败: "+(r.message||r.code),true);
+    const r=ctrlResult(j);
+    r.code===0?toast("已执行: "+desc):toast("执行失败: "+(r.message||("code "+r.code)),true);
   }catch(e){toast(e.message,true);}
 }
 function actionBtns(list){
@@ -477,6 +634,11 @@ function actionBtns(list){
 }
 
 /* ---- 面板组装 ---- */
+function deadKey(iid){return "cam-dead:"+DID+":"+iid;}
+function isCapFlag(m){
+  // 只读布尔「能力位」（云台控制/xxx状态），纯内部标志不可操作
+  return !m.writeable && m.format==="bool" && /(控制|状态)$/.test(m.description||"");
+}
 function renderPanels(){
   const root=$("#panels"); root.innerHTML="";
   if(!SPEC) return;
@@ -492,17 +654,28 @@ function renderPanels(){
     svcs[sid].acts.push({...m,iid});
   }
   const keys=Object.keys(svcs).sort((a,b)=>a-b);
+  let shown=0;
   for(const sid of keys){
     const s=svcs[sid];
+    const rows=[];
+    for(const iid of s.props){
+      const m=propMeta(iid), val=PROPS[iid];
+      const readable=!!(val&&val.code===0);
+      if(!m.writeable&&!readable) continue;            // 不可读也不可写：无意义
+      if(isCapFlag(m)) continue;                        // 能力位：不可操作
+      rows.push(iid);
+    }
+    if(!rows.length&&!s.acts.length) continue;          // 整个服务无有效项则不渲染
+    shown++;
     const det=document.createElement("details"); det.className="svc";
     if(sid==="2") det.open=true; // 摄像机控制默认展开
-    det.innerHTML=`<summary>${esc(s.name)}<span class="cnt">${s.props.length+s.acts.length} 项</span></summary>`;
+    det.innerHTML=`<summary>${esc(s.name)}<span class="cnt">${rows.length+s.acts.length} 项</span></summary>`;
     const body=document.createElement("div"); body.className="body";
-    for(const iid of s.props) body.appendChild(propRow(iid));
+    for(const iid of rows) body.appendChild(propRow(iid));
     if(s.acts.length) body.appendChild(actionBtns(s.acts));
     det.appendChild(body); root.appendChild(det);
   }
-  if(!keys.length) root.innerHTML='<div class="card muted">该设备无可用能力</div>';
+  if(!shown) root.innerHTML='<div class="card muted">该设备无可用能力</div>';
 }
 
 /* ---- 属性轮询 ---- */
@@ -537,16 +710,36 @@ async function loadSchedules(){
   const box=$("#schlist"); box.innerHTML=items.length?"":"<span class='muted'>暂无任务</span>";
   for(const s of items){
     const d=document.createElement("div"); d.className="schrow";
-    const tag=s.enabled?(s.last_ok===false?'<span class="tag bad">上次失败</span>':(s.last_run?'<span class="tag ok">今日已跑</span>':'<span class="tag">待执行</span>')):'<span class="tag dis">已停用</span>';
-    d.innerHTML=`<span class="t">${esc(s.time)}</span>
-      <span class="meta">${esc(cmap[s.did]||s.did)} · ${s.action==="on"?"开启":s.action==="off"?"关闭":esc(s.iid+"="+s.value)} ${tag}</span>`;
-    const tgl=document.createElement("button"); tgl.className="btn"; tgl.textContent=s.enabled?"停用":"启用";
-    tgl.onclick=async()=>{await api(`/api/schedules/${s.id}`,{method:"PATCH",body:JSON.stringify({enabled:!s.enabled})});loadSchedules();};
-    const run=document.createElement("button"); run.className="btn"; run.textContent="执行";
-    run.onclick=async()=>{try{await api(`/api/schedules/${s.id}/run`,{method:"POST"});toast("已执行");}catch(e){toast(e.message,true);}};
+    // 第一行：开关 + 时间 + 摄像头 + 删除
+    const l1=document.createElement("div"); l1.className="l1";
+    const sw=document.createElement("label"); sw.className="sw"; sw.title=s.enabled?"点击停用":"点击启用";
+    sw.innerHTML=`<input type="checkbox" ${s.enabled?"checked":""}><i></i>`;
+    sw.querySelector("input").onchange=async e=>{
+      e.target.disabled=true;
+      try{
+        await api(`/api/schedules/${s.id}`,{method:"PATCH",body:JSON.stringify({enabled:e.target.checked})});
+        loadSchedules();
+      }catch(err){ toast(err.message,true); e.target.disabled=false; }
+    };
+    const t=document.createElement("span"); t.className="t"; t.textContent=s.time;
+    const cam=document.createElement("span"); cam.className="cam"; cam.textContent=cmap[s.did]||s.did;
     const del=document.createElement("button"); del.className="btn danger"; del.textContent="删除";
-    del.onclick=async()=>{if(!confirm("删除该定时任务？"))return;await api(`/api/schedules/${s.id}`,{method:"DELETE"});loadSchedules();};
-    d.append(tgl,run,del); box.appendChild(d);
+    del.onclick=async()=>{if(!confirm(`删除 ${s.time} ${cmap[s.did]||s.did} 的定时任务？`))return;await api(`/api/schedules/${s.id}`,{method:"DELETE"});loadSchedules();};
+    l1.append(sw,t,cam,del);
+    // 第二行：动作 + 状态 + 试运行
+    const l2=document.createElement("div"); l2.className="l2";
+    const act=s.action==="on"?"开启":s.action==="off"?"关闭":`${s.iid} = ${s.value}`;
+    let tag;
+    if(!s.enabled) tag='<span class="tag dis">已停用</span>';
+    else if(s.last_ok===false) tag='<span class="tag bad">上次失败</span>';
+    else if(s.last_run) tag='<span class="tag ok">已执行</span>';
+    else tag='<span class="tag">到点执行</span>';
+    const run=document.createElement("button"); run.className="btn"; run.textContent="执行";
+    run.disabled=!s.enabled; run.title=s.enabled?"马上执行一次，不影响每天定时":"已停用，先打开上面的开关";
+    run.onclick=async()=>{try{await api(`/api/schedules/${s.id}/run`,{method:"POST"});toast("已执行");loadSchedules();}catch(e){toast(e.message,true);}};
+    l2.innerHTML=`<span>${act}</span>${tag}<span class="sp"></span>`;
+    l2.appendChild(run);
+    d.append(l1,l2); box.appendChild(d);
   }
 }
 $("#schAdd").onclick=async()=>{
@@ -578,7 +771,9 @@ async function selectCam(did){
 (async()=>{
   try{
     const cams=await loadCameras();
-    if(cams.length) await selectCam(cams[0].did);
+    // 默认选第一台「在线且 LAN 可达」的，避免落在无法出流的设备上
+    const ok=cams.find(c=>c.online&&c.lan_reachable!==false&&c.lan_reachable!==null)||cams[0];
+    if(ok) await selectCam(ok.did);
     await loadSchedules();
   }catch(e){
     $("#connState").textContent="miloco 连接失败";
@@ -591,8 +786,10 @@ async function selectCam(did){
 
 
 def main() -> None:
-    app = web.Application()
+    app = web.Application(middlewares=[auth_mw])
     app.router.add_get("/", h_index)
+    app.router.add_get("/login", h_login_get)
+    app.router.add_post("/login", h_login_post)
     app.router.add_get("/api/cameras", h_cameras)
     app.router.add_get("/api/devices/{did}/spec", h_spec)
     app.router.add_get("/api/devices/{did}/props", h_props)

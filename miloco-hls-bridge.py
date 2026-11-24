@@ -395,6 +395,11 @@ class CameraPipeline:
     def start(self) -> None:
         if self.task is None or self.task.done():
             self.ac_stop.clear()
+            # 立刻清掉上一场残留的 m3u8/分片，避免把旧播放列表吐给播放器
+            d = CACHE_DIR / self.did
+            for pat in ("index.m3u8", "a.m3u8", "s_*.ts", "a_*.ts"):
+                for old in d.glob(pat):
+                    old.unlink(missing_ok=True)
             self.task = asyncio.create_task(self._supervise())
             log(f"[{self.did}] 开始拉流")
 
@@ -613,7 +618,10 @@ class Bridge:
         self.session = session
         self.pipes: dict[str, CameraPipeline] = {}
         self.cameras: list[dict] = []
-        self.nocache = {"Cache-Control": "no-store"}
+        self.nocache = {
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+        }
 
     def pipe(self, did: str) -> CameraPipeline:
         p = self.pipes.get(did)
@@ -673,8 +681,23 @@ class Bridge:
         deadline = time.monotonic() + M3U8_WAIT
         while not m3u8.exists():
             if time.monotonic() > deadline or p.task.done():
-                return web.Response(status=503, text="流不可用（摄像头离线？）")
+                return web.Response(
+                    status=503, headers={"Retry-After": "3", **self.nocache},
+                    text="流不可用（摄像头离线？）",
+                )
             await asyncio.sleep(0.3)
+        # ffmpeg 已死但残留了 ENDLIST 播放列表时返回 503，
+        # 否则 hls.js 会把它当「直播结束」一直空转
+        if getattr(p, "ff", None) is None or not p.ff.alive:
+            try:
+                if "#EXT-X-ENDLIST" in m3u8.read_text():
+                    return web.Response(
+                        status=503,
+                        headers={"Retry-After": "5", **self.nocache},
+                        text="流重建中",
+                    )
+            except OSError:
+                pass
         return web.FileResponse(m3u8, headers=self.nocache)
 
     async def h_cam_m3u8(self, request):
@@ -692,8 +715,8 @@ class Bridge:
             touch(self.pipes[did])
         f = CACHE_DIR / did / f"{seg}.ts"
         if not f.exists():
-            return web.Response(status=404, text="gone")
-        return web.FileResponse(f)
+            return web.Response(status=404, headers=self.nocache, text="gone")
+        return web.FileResponse(f, headers=self.nocache)
 
     async def h_cam_seg(self, request):
         return await self._serve_seg(
