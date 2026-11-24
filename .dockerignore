@@ -1,0 +1,5 @@
+.git
+*.md
+watchdog.sh
+deploy/
+camera-power.sh
